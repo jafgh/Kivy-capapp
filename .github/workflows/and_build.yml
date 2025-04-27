@@ -1,0 +1,96 @@
+# اسم سير العمل الذي سيظهر في واجهة GitHub Actions
+name: Build Android APK
+
+# التحكم في وقت تشغيل سير العمل
+on:
+  # التشغيل عند الدفع إلى الفرع main
+  push:
+    branches: [ "main" ]
+  # التشغيل عند فتح أو تحديث طلب سحب يستهدف الفرع main
+  pull_request:
+    branches: [ "main" ]
+  # السماح بالتشغيل اليدوي من واجهة GitHub Actions
+  workflow_dispatch:
+
+# تعريف الوظائف (jobs) التي سيتم تنفيذها
+jobs:
+  # وظيفة بناء التطبيق
+  build-apk:
+    # اسم الوظيفة الذي سيظهر في الواجهة
+    name: Build Android APK with Buildozer
+    # نظام التشغيل الذي ستعمل عليه الوظيفة (مطلوب Linux لبناء Android)
+    runs-on: ubuntu-latest
+
+    # الخطوات التي ستنفذها الوظيفة
+    steps:
+      # 1. سحب (checkout) كود المستودع
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. إعداد بيئة Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9' # يمكنك اختيار إصدار بايثون متوافق
+
+      # 3. إعداد بيئة Java (مطلوبة لـ Android SDK)
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17' # يتطلب Android SDK الأحدث JDK 11 أو 17
+          distribution: 'temurin' # توزيعة Java شائعة
+
+      # 4. التخزين المؤقت لاعتماديات Buildozer/p4a لتسريع البناء
+      - name: Cache Buildozer dependencies
+        uses: actions/cache@v4
+        with:
+          path: .buildozer
+          key: buildozer-cache-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'requirements.txt') }}
+          restore-keys: |
+            buildozer-cache-${{ runner.os }}-
+
+      # 5. تثبيت حزم النظام المطلوبة لـ Buildozer و p4a
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+          git \
+          zip \
+          unzip \
+          build-essential \
+          autoconf \
+          libtool \
+          pkg-config \
+          zlib1g-dev \
+          libncurses5-dev \
+          libffi-dev \
+          libssl-dev \
+          ccache # ccache يسرع عمليات إعادة الترجمة
+
+      # 6. تثبيت Cython (موصى به لتجنب مشاكل بناء بعض الوصفات)
+      - name: Install Cython
+        run: pip install cython==0.29.36 # استخدم إصدارًا معروفًا بالتوافق
+
+      # 7. تثبيت Buildozer
+      - name: Install Buildozer
+        run: pip install buildozer
+
+      # 8. تشغيل أمر بناء Buildozer (لإنشاء APK تصحيحي)
+      #    -v  لإظهار مخرجات مفصلة (verbose)
+      #    يمكن تغيير debug إلى release إذا أردت بناء نسخة إصدار
+      - name: Build with Buildozer
+        run: buildozer -v android debug
+        env:
+           # تعطيل التحذير عند التشغيل كمستخدم قد يبدو كـ root (شائع في CI)
+           BUILDOZER_WARN_ON_ROOT: 0
+
+      # 9. رفع ملف APK الناتج كقطعة أثرية (artifact)
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # اسم القطعة الأثرية التي ستظهر في صفحة الـ run
+          name: CaptchaSolverApp-debug-apk
+          # المسار إلى الملف أو المجلد الذي تريد رفعه (Buildozer يضع الـ APK في مجلد bin)
+          path: bin/*.apk
+          # مدة الاحتفاظ بالقطعة الأثرية (اختياري، الافتراضي 90 يومًا)
+          # retention-days: 7
