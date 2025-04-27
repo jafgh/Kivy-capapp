@@ -1,0 +1,16 @@
+# Kivy core framework
+kivy
+
+# HTTP requests
+requests
+
+# Image processing
+Pillow
+
+# Numerical operations
+numpy
+
+ONNX model inference (Mobile version recommended for Android builds)
+# onnxruntime-mobile
+# أو جرب النسخة القياسية (قد تفشل عملية البناء - قم بإلغاء التعليق أدناه إذا أردت المحاولة)
+# onnxruntime
