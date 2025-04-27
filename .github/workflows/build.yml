@@ -1,0 +1,240 @@
+# Workflow name
+name: Build Kivy APK
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push events but only for the main/master branches
+  push:
+    branches: [ main, master ] # Adjust branch names if needed
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+    # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # Sets up Python environment
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9' # Specify desired Python version
+
+    # Cache the Buildozer global directory to speed up subsequent builds
+    - name: Cache Buildozer global directory
+      uses: actions/cache@v3
+      with:
+        path: ~/.buildozer
+        # Create a unique key based on the runner OS and the hash of buildozer.spec
+        key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}
+        # Fallback keys if the exact key is not found
+        restore-keys: |
+          ${{ runner.os }}-buildozer-
+
+    # Install essential system dependencies required by Buildozer and Android SDK/NDK
+    - name: Install system dependencies and JDK
+      run: |
+        sudo apt-get update
+        # Install necessary packages without recommended extras to save time/space
+        sudo apt-get install -y --no-install-recommends \
+          git \
+          zip \
+          unzip \
+          build-essential \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          libffi-dev \
+          libssl-dev \
+          liblzma-dev \
+          zlib1g-dev \
+          python3-pip \
+          python3-dev \
+          libgstreamer1.0-dev \
+          libgstreamer-plugins-base1.0-dev \
+          libgl1-mesa-dev \
+          libgles2-mesa-dev \
+          openjdk-17-jdk # Ensure JDK 17 (or required version) is installed
+        # Clean apt cache to save space on the runner
+        sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
+
+    # Download and set up the Android SDK command-line tools
+    - name: Install Android SDK Command-line Tools
+      env:
+        # Specify the command line tools version (check official Android site for latest if needed)
+        CMDLINE_TOOLS_VERSION: "11076708" # Example version, update if necessary
+        # Define the installation path for the Android SDK within the workspace
+        ANDROID_SDK_ROOT: "${{ github.workspace }}/android-sdk"
+      run: |
+        echo "Downloading Android SDK command-line tools version ${CMDLINE_TOOLS_VERSION}..."
+        # Create SDK root and tools directory
+        mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools"
+        # Download the command-line tools zip
+        wget -q "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip" -O cmdline-tools.zip
+
+        echo "Unzipping tools..."
+        # Unzip into the target directory
+        unzip -q cmdline-tools.zip -d "${ANDROID_SDK_ROOT}/cmdline-tools"
+        # The zip usually contains a 'cmdline-tools' directory inside. We need to move its contents
+        # into 'cmdline-tools/latest' to match the expected structure for sdkmanager.
+        if [ -d "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools" ]; then
+          echo "Moving nested cmdline-tools contents to cmdline-tools/latest..."
+          mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+          mv "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools/"* "${ANDROID_SDK_ROOT}/cmdline-tools/latest/"
+          rm -rf "${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools"
+        else
+          echo "WARN: Expected nested 'cmdline-tools' directory not found after unzip. Trying alternative structure."
+          # Handle case where it might unzip directly into cmdline-tools (less common)
+          if [ -d "${ANDROID_SDK_ROOT}/cmdline-tools/bin" ]; then
+             echo "Assuming direct unzip structure. Moving contents to 'latest'."
+             mkdir -p "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+             # Move all top-level items (except 'latest' itself) into 'latest'
+             find "${ANDROID_SDK_ROOT}/cmdline-tools" -maxdepth 1 -mindepth 1 ! -name 'latest' -exec mv -t "${ANDROID_SDK_ROOT}/cmdline-tools/latest/" {} +
+          else
+            echo "ERROR: Could not determine command-line tools structure after unzip. Listing contents:"
+            ls -lR "${ANDROID_SDK_ROOT}/cmdline-tools"
+            exit 1
+          fi
+        fi
+        # Clean up the downloaded zip file
+        rm cmdline-tools.zip
+
+        # Define standard paths for tools
+        CMDLINE_TOOLS_PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin"
+        PLATFORM_TOOLS_PATH="${ANDROID_SDK_ROOT}/platform-tools" # Platform tools installed in next step
+
+        echo "Adding SDK paths to environment variables..."
+        # Export ANDROID_SDK_ROOT for Buildozer and sdkmanager
+        echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> $GITHUB_ENV
+        # Add command-line tools and platform-tools (once installed) to the system PATH
+        echo "PATH=${PATH}:${CMDLINE_TOOLS_PATH}:${PLATFORM_TOOLS_PATH}" >> $GITHUB_ENV
+
+        echo "Android SDK Root set to: ${ANDROID_SDK_ROOT}"
+        echo "Updated PATH includes: ${CMDLINE_TOOLS_PATH} and ${PLATFORM_TOOLS_PATH}"
+
+        echo "Verifying sdkmanager installation..."
+        # Check if sdkmanager exists at the expected path
+        if [ ! -f "${CMDLINE_TOOLS_PATH}/sdkmanager" ]; then
+          echo "ERROR: sdkmanager not found at ${CMDLINE_TOOLS_PATH}/sdkmanager"
+          echo "Listing contents of ${ANDROID_SDK_ROOT}/cmdline-tools/latest:"
+          ls -lR "${ANDROID_SDK_ROOT}/cmdline-tools/latest"
+          exit 1
+        else
+          ls -l "${CMDLINE_TOOLS_PATH}/sdkmanager"
+          echo "sdkmanager found."
+        fi
+
+    # Install the required Android SDK platforms, build-tools, and NDK using sdkmanager
+    - name: Install Android SDK components and NDK
+      env:
+        # --- IMPORTANT: SET THESE TO MATCH your buildozer.spec file ---
+        ANDROID_PLATFORM_VERSION: "34"        # <-- Set to match 'android.api' in buildozer.spec
+        ANDROID_BUILD_TOOLS_VERSION: "34.0.0" # <-- Set to match 'android.build_tools_version' in buildozer.spec (e.g., 34.0.0, 36.0.0)
+        ANDROID_NDK_VERSION: "25.2.9519653"   # <-- Set to match 'android.ndk_version' in buildozer.spec (check Buildozer docs for compatible NDKs)
+      run: |
+        echo "Installing Android SDK platform-tools, platforms, build-tools, and NDK..."
+        echo "Using ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+        echo "Accepting SDK licenses..."
+        # Automatically accept licenses to prevent interactive prompts
+        yes | sdkmanager --licenses > /dev/null || echo "Warning: Failed to accept licenses automatically."
+
+        echo "Installing components: Platform=android-${ANDROID_PLATFORM_VERSION}, BuildTools=${ANDROID_BUILD_TOOLS_VERSION}, NDK=${ANDROID_NDK_VERSION}"
+        # Use sdkmanager to install the specified components
+        sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" "ndk;${ANDROID_NDK_VERSION}"
+
+        echo "Setting ANDROID_NDK_HOME..."
+        # Explicitly set ANDROID_NDK_HOME for Buildozer
+        echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> $GITHUB_ENV
+
+        echo "Verifying installations..."
+        echo "NDK path: ${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}"
+        ls -l $ANDROID_SDK_ROOT/ndk/ # List installed NDK versions
+        echo "Build-tools path: ${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}"
+        ls -l $ANDROID_SDK_ROOT/build-tools/ # List installed build-tools versions
+        echo "Verifying aidl presence..."
+        # Check if aidl tool exists in the installed build-tools directory
+        ls -l $ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/aidl || echo "ERROR: aidl not found in build-tools directory!"
+
+    - name: Link Android SDK root for Buildozer
+      run: |
+        # تأكد من وجود المجلد الأب قبل الربط
+        mkdir -p $HOME/.buildozer/android/platform
+        # احذف الرابط القديم إن وُجد ثم اربط مجلد SDK المثبت عبر sdkmanager
+        rm -rf $HOME/.buildozer/android/platform/android-sdk
+        ln -s "${{ github.workspace }}/android-sdk" $HOME/.buildozer/android/platform/android-sdk
+
+    - name: Link sdkmanager for Buildozer expected path
+      run: |
+        # تأكد من وجود مجلد tools/bin ثم اربط sdkmanager
+        mkdir -p $HOME/.buildozer/android/platform/android-sdk/tools/bin
+        rm -f $HOME/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager
+        ln -s "${{ github.workspace }}/android-sdk/cmdline-tools/latest/bin/sdkmanager" $HOME/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager
+
+    - name: Accept Android SDK Licenses for Buildozer
+      run: |
+        # قبول جميع التراخيص قبل تثبيت build-tools
+        yes | $HOME/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager --sdk_root=$HOME/.buildozer/android/platform/android-sdk --licenses
+
+
+    - name: Accept Android SDK Licenses for Buildozer
+      run: |
+        yes | ~/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager --sdk_root=$HOME/.buildozer/android/platform/android-sdk --licenses
+
+    # Install Python dependencies: Buildozer and Cython
+    - name: Install/Upgrade buildozer and cython
+      run: |
+        # Upgrade pip, setuptools, and wheel first
+        python -m pip install --upgrade pip setuptools wheel
+        # Install Cython (often required for Kivy dependencies)
+        pip install cython
+        # Install or upgrade Buildozer to the latest version
+        pip install --upgrade buildozer
+
+    # Optional but recommended: Clean any previous Buildozer build artifacts
+    - name: Clean previous build artifacts
+      run: |
+        echo "Running buildozer clean..."
+        # Run clean; continue even if it fails (e.g., first run, nothing to clean)
+        buildozer clean || echo "Clean failed or directory didn't exist, continuing..."
+
+    # Verify that the necessary environment variables are set before building
+    - name: Verify Environment Variables
+      run: |
+        echo "Verifying environment variables before build:"
+        echo "ANDROID_SDK_ROOT is: $ANDROID_SDK_ROOT"
+        echo "ANDROID_NDK_HOME is: $ANDROID_NDK_HOME"
+        echo "PATH contains SDK paths: $PATH"
+        # Remind the user to check their spec file for conflicting settings
+        echo "---"
+        echo "REMINDER: Ensure your 'buildozer.spec' file does NOT contain hardcoded paths like"
+        echo "'android.sdk_path', 'android.ndk_path', or the deprecated 'android.sdk ='."
+        echo "Also, ensure the versions specified in the spec match the ones installed in the 'Install Android SDK components' step."
+        echo "---"
+
+    # Run Buildozer to compile the APK
+    - name: Build APK with Buildozer
+      run: |
+        echo "Starting Buildozer build..."
+        # Run the build command with verbose output (-v) for better debugging
+        buildozer -v android debug
+
+    # Upload the generated APK as a build artifact
+    - name: Upload APK artifact
+      uses: actions/upload-artifact@v4
+      with:
+        # Name of the artifact to be uploaded
+        name: kivy-app-apk # Rename as desired
+        # Path to the APK file(s) generated by Buildozer (usually in the bin directory)
+        path: bin/*.apk
